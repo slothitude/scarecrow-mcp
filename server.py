@@ -52,6 +52,7 @@ mcp = FastMCP("scarecrow-consult")
 
 
 def _call(question: str, lane: str, max_tokens: int, retries: int) -> dict[str, Any]:
+    retries = max(1, int(retries))  # at least one attempt; retries=0 would index an empty list
     body = json.dumps({
         "model": lane,
         "messages": [{"role": "user", "content": question}],
