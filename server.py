@@ -23,6 +23,10 @@ Notes: upstreams rotate free reasoning models — max_tokens must be generous
 (>= 6000) and null-content responses are retried (the balancer picks a
 different upstream per call). The upstream "model" field is always reported
 back alongside the answer so the consulted brain is never in doubt.
+Format law (2026-11-26): every ask carries a prose-steering suffix and every
+answer passes through _render() — JSON-array/object replies are pretty-printed,
+double-encoded strings unwrapped — so consults never come back as escape-soup
+even when a bridge brain drifts into compact-JSON style.
 """
 
 import json
@@ -34,6 +38,14 @@ from mcp.server.fastmcp import FastMCP
 PROXY = "http://192.168.0.33:8486/v1/chat/completions"
 KEY = "evo-local"
 DEFAULT_LANE = "bridge-chatgpt"
+
+# Bridge brains sit in persistent chat threads with account memory, so they
+# sometimes drift into compact JSON-array replies (2026-11-26, bridge-chatgpt:
+# three consults in a row answered as bare config fragments). Steer every ask
+# back to prose and render any JSON that still arrives instead of passing the
+# escape-soup through.
+STEER = ("\n\n[Reply in plain markdown prose — never as a JSON array or object. "
+         "Prose, lists and headings only.]")
 
 LANES: dict[str, str] = {
     "bridge-chatgpt": "GPT-6 (OpenAI, via browser bridge) — default consultation brain",
@@ -51,11 +63,40 @@ LANES: dict[str, str] = {
 mcp = FastMCP("scarecrow-consult")
 
 
+def _render(content: str) -> str:
+    """Make JSON-shaped answers readable instead of escape-soup.
+
+    Unwraps double-encoded JSON strings ('"[{...}]"') and pretty-prints
+    anything that parses as a JSON array/object. Plain prose passes through
+    untouched, so a legit fenced ```json block is never mangled (it starts
+    with a backtick, not [ or {)."""
+    text = (content or "").strip()
+    for _ in range(3):  # a bridge once returned triple-encoded; unwrap until stable
+        if len(text) > 1 and text[0] == '"' and text[-1] == '"':
+            try:
+                inner = json.loads(text)
+            except ValueError:
+                break
+            if isinstance(inner, str):
+                text = inner.strip()
+                continue
+            break
+        break
+    if text[:1] in "[{":
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(parsed, (list, dict)):
+            return json.dumps(parsed, indent=2, ensure_ascii=False)
+    return text
+
+
 def _call(question: str, lane: str, max_tokens: int, retries: int) -> dict[str, Any]:
     retries = max(1, int(retries))  # at least one attempt; retries=0 would index an empty list
     body = json.dumps({
         "model": lane,
-        "messages": [{"role": "user", "content": question}],
+        "messages": [{"role": "user", "content": question + STEER}],
         "max_tokens": max_tokens,
     }).encode()
     attempts: list[dict[str, Any]] = []
@@ -74,9 +115,9 @@ def _call(question: str, lane: str, max_tokens: int, retries: int) -> dict[str, 
         attempts.append({"attempt": i + 1, "upstream": upstream,
                          "finish": r["choices"][0].get("finish_reason"),
                          "content_len": len(content) if content else 0})
-        if content and len(content.strip()) > 0:
+        if content and len(str(content).strip()) > 0:
             return {"lane": lane, "upstream_model": upstream,
-                    "attempts": attempts, "answer": content}
+                    "attempts": attempts, "answer": _render(str(content))}
     return {"lane": lane, "upstream_model": attempts[-1].get("upstream"),
             "attempts": attempts, "answer": None,
             "error": "all attempts returned empty content — raise max_tokens or retry"}

@@ -129,9 +129,39 @@ listing, and two live consults (bridge-chatgpt + nvapi) asserting exact canary
 responses. Record run: **PASS, all steps green, both consults landed first attempt** —
 `bridge-chatgpt → upstream "chatgpt"`, `nvapi → upstream "private/nvidia/nemotron-3.5-super-120b-a12b"`.
 
+## Format handling (2026-11-26 fix)
+
+Consults through the bridge lanes once came back as bare JSON arrays — compact
+config fragments instead of the markdown plan that was asked for. Diagnosis
+(full chain traced MCP → balancer :8486 → adapter :8507 → browser-ai-bridge
+:18505): the balancer and adapter are byte-faithful pass-throughs, and the
+bridge's own request log recorded the same fragments it delivered. The brains
+sit in **persistent chat threads with account memory**, so style drifts —
+after enough spec/config-heavy asks, bridge-chatgpt started replying in
+compact JSON. What the owner sees in the ChatGPT web UI looks fine; the MCP
+console gets the same bytes as escape-soup.
+
+Fix, in this server only:
+
+- **Steering** — every question carries a suffix instructing plain markdown
+  prose, never JSON arrays/objects.
+- **Rendering** — `_render()` unwraps double-encoded JSON strings and
+  pretty-prints anything that parses as a JSON array/object. Plain prose and
+  fenced code blocks pass through untouched.
+
+Known deeper option (NOT applied — lives in sunny's projects, needs owner
+sign-off): a `freshChat` flag on the bridge `/api/ask` (the code path already
+exists — `startNewChat` fires today only on rate-limit/refusal retries) so
+each consult opens a clean thread.
+
 ## Honest limits
 
-- **No memory between calls** — every consult is stateless; pass full context.
+- **No memory between calls (MCP is stateless; the brains are NOT)** — this
+  server keeps no state and full context must be passed every time, but the
+  bridge threads persist across consults and the browser accounts carry
+  ChatGPT-side memory of earlier conversations. Context can leak in through
+  the back door; treat answers as influenced by prior traffic, and route
+  anything sensitive accordingly.
 - **No streaming** — answers arrive whole.
 - **The brains can be wrong** — this tool transports answers; triage is your job.
   (One recorded consultation returned a plausible-sounding failure mode whose core
